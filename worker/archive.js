@@ -16,7 +16,6 @@ function generateUrls(base, start, end, step, width, symbol) {
   return urls;
 }
 
-// download helper
 function downloadFile(url, filePath) {
   return new Promise((resolve, reject) => {
     const client = url.startsWith("https") ? https : http;
@@ -34,6 +33,14 @@ function downloadFile(url, filePath) {
   });
 }
 
+function safeUrl(u) {
+  try {
+    return new URL(u).href;
+  } catch {
+    return null;
+  }
+}
+
 (async () => {
   const baseUrl = process.env.BASE_URL;
   const start = parseInt(process.env.START);
@@ -45,11 +52,13 @@ function downloadFile(url, filePath) {
   const urls = generateUrls(baseUrl, start, end, step, padding, symbol);
 
   const browser = await chromium.launch();
-  const page = await browser.newPage();
+  const page = await browser.newPage({
+    javaScriptEnabled: true
+  });
 
   fs.ensureDirSync("output");
 
-  console.log(`Starting archive: ${urls.length} pages`);
+  console.log(`Starting archive: ${urls.length} chapters`);
 
   let chapterIndex = 1;
 
@@ -61,39 +70,96 @@ function downloadFile(url, filePath) {
     fs.ensureDirSync(assetDir);
 
     try {
-      console.log(`Processing ${url}`);
+      console.log(`\n[${chapterId}] Loading ${url}`);
 
-      await page.goto(url, { waitUntil: "networkidle" });
+      await page.goto(url, {
+        waitUntil: "networkidle",
+        timeout: 60000
+      });
 
-      // extract images
-      const images = await page.$$eval("img", imgs =>
-        imgs.map(img => img.src || img.getAttribute("data-src"))
-      );
+      // Wait a bit for lazy-loaded images
+      await page.waitForTimeout(2000);
 
-      let html = await page.content();
+      // Extract ALL relevant assets
+      const assets = await page.evaluate(() => {
+        const list = [];
 
-      let imgIndex = 1;
+        // images
+        document.querySelectorAll("img").forEach(img => {
+          const src =
+            img.currentSrc ||
+            img.src ||
+            img.getAttribute("data-src") ||
+            img.getAttribute("data-original");
 
-      for (const imgUrl of images) {
-        if (!imgUrl) continue;
+          if (src) list.push({ type: "img", url: src });
+        });
 
-        const ext = path.extname(imgUrl.split("?")[0]) || ".jpg";
-        const fileName = `img${imgIndex}${ext}`;
+        // CSS
+        document.querySelectorAll("link[rel='stylesheet']").forEach(link => {
+          if (link.href) list.push({ type: "css", url: link.href });
+        });
+
+        return list;
+      });
+
+      console.log(`Found assets: ${assets.length}`);
+
+      let fileIndex = 1;
+
+      // Download assets
+      for (const asset of assets) {
+        const clean = safeUrl(asset.url);
+        if (!clean) continue;
+
+        const ext =
+          path.extname(new URL(clean).pathname.split("?")[0]) || ".bin";
+
+        const fileName = `asset_${fileIndex}${ext}`;
         const filePath = path.join(assetDir, fileName);
 
         try {
-          await downloadFile(imgUrl, filePath);
+          await downloadFile(clean, filePath);
 
-          // replace in HTML
-          html = html.replaceAll(imgUrl, `assets/${fileName}`);
+          // Replace references in DOM (best effort)
+          await page.evaluate((original, local) => {
+            const elements = document.querySelectorAll("*");
 
-          imgIndex++;
+            elements.forEach(el => {
+              if (el.src === original) el.src = local;
+              if (el.href === original) el.href = local;
+
+              // lazy-load patterns
+              if (el.getAttribute("data-src") === original)
+                el.setAttribute("data-src", local);
+
+              if (el.style && el.style.backgroundImage?.includes(original)) {
+                el.style.backgroundImage =
+                  el.style.backgroundImage.replace(original, local);
+              }
+            });
+          }, clean, `assets/${fileName}`);
+
+          fileIndex++;
         } catch (err) {
-          console.log(`Image failed: ${imgUrl}`);
+          console.log("Asset failed:", clean);
         }
       }
 
-      fs.writeFileSync(path.join(chapterDir, "index.html"), html);
+      // FINAL HTML SNAPSHOT (clean rendered DOM)
+      const html = await page.evaluate(() => {
+        // inject base so relative paths resolve locally
+        const base = document.createElement("base");
+        base.href = "./";
+        document.head.prepend(base);
+
+        return document.documentElement.outerHTML;
+      });
+
+      fs.writeFileSync(
+        path.join(chapterDir, "index.html"),
+        html
+      );
 
       console.log(`Saved chapter ${chapterId}`);
       chapterIndex++;
@@ -105,5 +171,5 @@ function downloadFile(url, filePath) {
 
   await browser.close();
 
-  console.log("DONE");
+  console.log("\nDONE - archive complete");
 })();
