@@ -1,7 +1,8 @@
 const fs = require("fs-extra");
 const path = require("path");
-const archiver = require("archiver");
 const { chromium } = require("playwright");
+const https = require("https");
+const http = require("http");
 
 function pad(num, width) {
   return String(num).padStart(width, "0");
@@ -15,24 +16,22 @@ function generateUrls(base, start, end, step, width, symbol) {
   return urls;
 }
 
-async function savePage(page, url, outputPath, index) {
-  await page.goto(url, { waitUntil: "networkidle" });
+// download helper
+function downloadFile(url, filePath) {
+  return new Promise((resolve, reject) => {
+    const client = url.startsWith("https") ? https : http;
 
-  const html = await page.content();
+    client.get(url, (res) => {
+      if (res.statusCode !== 200) {
+        return reject(new Error(`Failed: ${res.statusCode}`));
+      }
 
-  fs.writeFileSync(
-    path.join(outputPath, `${index}.html`),
-    html
-  );
-}
+      const file = fs.createWriteStream(filePath);
+      res.pipe(file);
 
-async function zipFolder(folderPath, outPath) {
-  const output = fs.createWriteStream(outPath);
-  const archive = archiver("zip");
-
-  archive.pipe(output);
-  archive.directory(folderPath, false);
-  await archive.finalize();
+      file.on("finish", () => file.close(resolve));
+    }).on("error", reject);
+  });
 }
 
 (async () => {
@@ -45,32 +44,66 @@ async function zipFolder(folderPath, outPath) {
 
   const urls = generateUrls(baseUrl, start, end, step, padding, symbol);
 
-  const outputDir = "output/pages";
-  fs.ensureDirSync(outputDir);
-
   const browser = await chromium.launch();
   const page = await browser.newPage();
 
-  console.log(`Archiving ${urls.length} pages...`);
+  fs.ensureDirSync("output");
 
-  let index = 1;
+  console.log(`Starting archive: ${urls.length} pages`);
+
+  let chapterIndex = 1;
 
   for (const url of urls) {
-    try {
-      console.log(`Saving: ${url}`);
+    const chapterId = pad(chapterIndex, 3);
+    const chapterDir = path.join("output", `chapter${chapterId}`);
+    const assetDir = path.join(chapterDir, "assets");
 
-      await savePage(page, url, outputDir, String(index).padStart(3, "0"));
-      index++;
+    fs.ensureDirSync(assetDir);
+
+    try {
+      console.log(`Processing ${url}`);
+
+      await page.goto(url, { waitUntil: "networkidle" });
+
+      // extract images
+      const images = await page.$$eval("img", imgs =>
+        imgs.map(img => img.src || img.getAttribute("data-src"))
+      );
+
+      let html = await page.content();
+
+      let imgIndex = 1;
+
+      for (const imgUrl of images) {
+        if (!imgUrl) continue;
+
+        const ext = path.extname(imgUrl.split("?")[0]) || ".jpg";
+        const fileName = `img${imgIndex}${ext}`;
+        const filePath = path.join(assetDir, fileName);
+
+        try {
+          await downloadFile(imgUrl, filePath);
+
+          // replace in HTML
+          html = html.replaceAll(imgUrl, `assets/${fileName}`);
+
+          imgIndex++;
+        } catch (err) {
+          console.log(`Image failed: ${imgUrl}`);
+        }
+      }
+
+      fs.writeFileSync(path.join(chapterDir, "index.html"), html);
+
+      console.log(`Saved chapter ${chapterId}`);
+      chapterIndex++;
+
     } catch (err) {
-      console.log(`Failed: ${url}`, err.message);
+      console.log(`Failed chapter ${url}:`, err.message);
     }
   }
 
   await browser.close();
 
-  fs.ensureDirSync("output");
-
-  await zipFolder(outputDir, "output/archive.zip");
-
-  console.log("Done!");
+  console.log("DONE");
 })();
