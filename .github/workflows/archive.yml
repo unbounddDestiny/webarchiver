@@ -1,0 +1,58 @@
+name: Web Archiver
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseUrl:
+        description: "Base URL with # placeholder"
+        required: true
+      start:
+        required: true
+        default: "1"
+      end:
+        required: true
+        default: "10"
+      padding:
+        required: true
+        default: "3"
+      step:
+        required: true
+        default: "1"
+      symbol:
+        required: true
+        default: "#"
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install playwright archiver fs-extra
+
+      - name: Install browsers
+        run: npx playwright install --with-deps
+
+      - name: Run archiver
+        run: node worker/archive.js
+        env:
+          BASE_URL: ${{ github.event.inputs.baseUrl }}
+          START: ${{ github.event.inputs.start }}
+          END: ${{ github.event.inputs.end }}
+          PADDING: ${{ github.event.inputs.padding }}
+          STEP: ${{ github.event.inputs.step }}
+          SYMBOL: ${{ github.event.inputs.symbol }}
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-output
+          path: output/
