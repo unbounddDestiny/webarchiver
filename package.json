@@ -1,0 +1,10 @@
+{
+  "name": "web-archiver",
+  "version": "1.0.0",
+  "main": "worker/archive.js",
+  "dependencies": {
+    "archiver": "^6.0.0",
+    "fs-extra": "^11.0.0",
+    "playwright": "^1.40.0"
+  }
+}
