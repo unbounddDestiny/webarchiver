@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang=“en”>
+<head>
+  <meta charset=“UTF-8” />
+  <meta name=“viewport” content=“width=device-width, initial-scale=1.0”/>
+  <title>Web Archiver</title>
+  <link rel=“stylesheet” href=“style.css”>
+</head>
+<body>
+  <div class=“container”>
+    <h1>Web Archiver</h1>
+
+    <div class=“card”>
+      <label>Base URL</label>
+      <input id=“baseUrl” placeholder=“https://example.com/chapter#” />
+
+      <label>Start</label>
+      <input id=“start” type=“number” value=“1” />
+
+      <label>End</label>
+      <input id=“end” type=“number” value=“10” />
+
+      <label>Padding Width</label>
+      <input id=“padding” type=“number” value=“3” />
+
+      <label>Increment</label>
+      <input id=“increment” type=“number” value=“1” />
+
+      <label>Replace Symbol</label>
+      <input id=“symbol” value=“#” />
+
+      <button id=“generateBtn”>Generate Job</button>
+    </div>
+
+    <div class=“card”>
+      <h2>Generated Config</h2>
+      <pre id=“output”>Nothing generated yet</pre>
+    </div>
+
+    <div class=“card”>
+      <h2>Status</h2>
+      <p id=“status”>Idle</p>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
