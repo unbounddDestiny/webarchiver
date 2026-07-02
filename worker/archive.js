@@ -15,9 +15,28 @@ function generateUrls(base, start, end, step, width, symbol) {
   return urls;
 }
 
-const response = await page.request.get(imgUrl);
-if (!response.ok()) throw new Error(`HTTP ${response.status()}`);
-const buffer = await response.body();
+// Download image into a Buffer
+function downloadBuffer(url) {
+  return new Promise((resolve, reject) => {
+    const client = url.startsWith("https") ? https : http;
+
+    client
+      .get(url, (res) => {
+        if (res.statusCode !== 200) {
+          return reject(new Error(`Failed: ${res.statusCode}`));
+        }
+
+        const chunks = [];
+
+        res.on("data", (chunk) => chunks.push(chunk));
+
+        res.on("end", () => {
+          resolve(Buffer.concat(chunks));
+        });
+      })
+      .on("error", reject);
+  });
+}
 
 (async () => {
   const baseUrl = process.env.BASE_URL;
