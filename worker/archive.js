@@ -19,6 +19,54 @@ function generateUrls(base, start, end, step, width, symbol) {
   return out;
 }
 
+// -------------------------
+// SMART AUTO SCROLL ENGINE
+// -------------------------
+async function autoScroll(page) {
+  let previousHeight = 0;
+  let stableRounds = 0;
+
+  while (stableRounds < 3) {
+    const newHeight = await page.evaluate(() => document.body.scrollHeight);
+
+    if (newHeight === previousHeight) {
+      stableRounds++;
+    } else {
+      stableRounds = 0;
+      previousHeight = newHeight;
+    }
+
+    await page.evaluate(() => {
+      window.scrollBy(0, window.innerHeight * 0.8);
+    });
+
+    await page.waitForTimeout(800);
+  }
+}
+
+// -------------------------
+// IMAGE EXTRACTION
+// -------------------------
+async function extractImages(page) {
+  return await page.$$eval("img", imgs => {
+    const extractSrcset = (srcset) =>
+      srcset
+        ? srcset.split(",").map(s => s.trim().split(" ")[0])
+        : [];
+
+    const urls = imgs.flatMap(img => [
+      img.currentSrc,
+      img.src,
+      img.getAttribute("data-src"),
+      img.getAttribute("data-original"),
+      img.getAttribute("data-lazy"),
+      ...extractSrcset(img.getAttribute("srcset")),
+    ]);
+
+    return [...new Set(urls.filter(Boolean))];
+  });
+}
+
 (async () => {
   const baseUrl = process.env.BASE_URL;
   const start = mustInt(process.env.START, "START");
@@ -40,7 +88,7 @@ function generateUrls(base, start, end, step, width, symbol) {
 <html>
 <head>
 <meta charset="utf-8">
-<title>Offline Image Archive</title>
+<title>Adaptive Image Archive</title>
 <style>
 body {
   margin: 0;
@@ -49,6 +97,7 @@ body {
   flex-direction: column;
   align-items: center;
 }
+
 img {
   max-width: 95%;
   margin: 10px 0;
@@ -66,31 +115,38 @@ img {
     const page = await context.newPage();
 
     try {
-      console.log(`Scraping: ${url}`);
+      console.log(`\nVisiting: ${url}`);
 
       await page.goto(url, {
         waitUntil: "domcontentloaded",
         timeout: 90000,
       });
 
+      // initial settle
       await page.waitForTimeout(1500);
 
-      const images = await page.$$eval("img", imgs => {
-        const extractSrcset = (srcset) =>
-          srcset
-            ? srcset.split(",").map(s => s.trim().split(" ")[0])
-            : [];
+      // -------------------------
+      // ADAPTIVE LAZY LOADING
+      // -------------------------
+      await autoScroll(page);
 
-        return [...new Set(imgs.flatMap(img => [
-          img.currentSrc,
-          img.src,
-          img.getAttribute("data-src"),
-          img.getAttribute("data-original"),
-          img.getAttribute("data-lazy"),
-          ...extractSrcset(img.getAttribute("srcset")),
-        ]).filter(Boolean))];
+      // final scroll burst (some sites need it)
+      await page.evaluate(() => {
+        window.scrollTo(0, document.body.scrollHeight);
       });
 
+      await page.waitForTimeout(1500);
+
+      // -------------------------
+      // EXTRACT IMAGES AFTER LOAD
+      // -------------------------
+      const images = await extractImages(page);
+
+      console.log(`Found ${images.length} images`);
+
+      // -------------------------
+      // DOWNLOAD + EMBED
+      // -------------------------
       for (const imgUrl of images) {
         if (seen.has(imgUrl)) continue;
         seen.add(imgUrl);
@@ -100,15 +156,15 @@ img {
             timeout: 30000,
             headers: {
               referer: url,
+              "user-agent":
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
             },
           });
 
           if (!res.ok()) throw new Error(`HTTP ${res.status()}`);
 
           const buffer = await res.body();
-
-          const contentType =
-            res.headers()["content-type"] || "image/jpeg";
+          const contentType = res.headers()["content-type"] || "image/jpeg";
 
           const base64 = buffer.toString("base64");
 
@@ -118,7 +174,7 @@ img {
 </div>
 `);
 
-          console.log(`Embedded image ${imgIndex}`);
+          console.log(`Embedded ${imgIndex}`);
           imgIndex++;
 
         } catch (err) {
