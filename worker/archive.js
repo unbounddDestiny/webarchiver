@@ -26,9 +26,10 @@ async function autoScroll(page) {
   let previousHeight = 0;
   let stableRounds = 0;
 
-  while (stableRounds < 3) {
+  while (stableRounds < 4) {
     const newHeight = await page.evaluate(() => document.body.scrollHeight);
 
+    // detect if page stopped growing
     if (newHeight === previousHeight) {
       stableRounds++;
     } else {
@@ -36,13 +37,19 @@ async function autoScroll(page) {
       previousHeight = newHeight;
     }
 
+    // scroll a bit (not full jump)
     await page.evaluate(() => {
-      window.scrollBy(0, window.innerHeight * 0.8);
+      window.scrollBy(0, window.innerHeight * 0.6);
     });
 
-    await page.waitForTimeout(800);
+    // 🔥 KEY FIX: wait long enough for delayed injection
+    await page.waitForTimeout(5000);
+
+    // extra micro-wait for JS batching (important for React sites)
+    await page.waitForTimeout(1000);
   }
 }
+
 
 // -------------------------
 // IMAGE EXTRACTION
