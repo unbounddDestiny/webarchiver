@@ -5,134 +5,127 @@ function pad(num, width) {
   return String(num).padStart(width, "0");
 }
 
-function mustInt(value, name) {
-  const n = parseInt(value);
+function mustInt(v, name) {
+  const n = parseInt(v);
   if (Number.isNaN(n)) throw new Error(`Invalid ${name}`);
   return n;
 }
 
 function generateUrls(base, start, end, step, width, symbol) {
-  const urls = [];
+  const out = [];
   for (let i = start; i <= end; i += step) {
-    urls.push(base.replace(symbol, pad(i, width)));
+    out.push(base.replace(symbol, pad(i, width)));
   }
-  return urls;
-}
-
-async function withRetry(fn, retries = 3) {
-  let lastErr;
-  for (let i = 0; i < retries; i++) {
-    try {
-      return await fn();
-    } catch (err) {
-      lastErr = err;
-    }
-  }
-  throw lastErr;
+  return out;
 }
 
 (async () => {
   const baseUrl = process.env.BASE_URL;
   const start = mustInt(process.env.START, "START");
   const end = mustInt(process.env.END, "END");
-  const padding = mustInt(process.env.PADDING, "PADDING");
   const step = mustInt(process.env.STEP, "STEP");
+  const width = mustInt(process.env.PADDING, "PADDING");
   const symbol = process.env.SYMBOL;
 
-  const urls = generateUrls(baseUrl, start, end, step, padding, symbol);
+  const urls = generateUrls(baseUrl, start, end, step, width, symbol);
 
   const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext();
 
   fs.ensureDirSync("output");
+
   const stream = fs.createWriteStream("output/scroll.html");
 
-  stream.write(`<!DOCTYPE html>
+  stream.write(`<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>Image Archive</title>
+<title>Offline Image Archive</title>
 <style>
-body { margin:0; background:#111; display:flex; flex-direction:column; align-items:center; }
-img { max-width:95%; margin:10px 0; box-shadow:0 0 10px rgba(0,0,0,.5); }
+body {
+  margin: 0;
+  background: #111;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+img {
+  max-width: 95%;
+  margin: 10px 0;
+  box-shadow: 0 0 10px rgba(0,0,0,0.6);
+}
 </style>
 </head>
 <body>
 `);
 
-  console.log(`Starting scrape: ${urls.length} pages`);
-
-  let globalIndex = 1;
+  let imgIndex = 1;
+  const seen = new Set();
 
   for (const url of urls) {
-    const page = await browser.newPage();
+    const page = await context.newPage();
 
     try {
-      console.log(`\nVisiting: ${url}`);
+      console.log(`Scraping: ${url}`);
 
       await page.goto(url, {
         waitUntil: "domcontentloaded",
-        timeout: 60000,
+        timeout: 90000,
       });
 
-      await page.waitForSelector("img", { timeout: 10000 });
-
-      // Trigger lazy-loading
-      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
       await page.waitForTimeout(1500);
 
-      const images = await page.$$eval("img", (imgs) => {
+      const images = await page.$$eval("img", imgs => {
         const extractSrcset = (srcset) =>
           srcset
-            ? srcset.split(",").map((s) => s.trim().split(" ")[0])
+            ? srcset.split(",").map(s => s.trim().split(" ")[0])
             : [];
 
-        const urls = imgs.flatMap((img) => [
+        return [...new Set(imgs.flatMap(img => [
           img.currentSrc,
           img.src,
           img.getAttribute("data-src"),
           img.getAttribute("data-original"),
           img.getAttribute("data-lazy"),
           ...extractSrcset(img.getAttribute("srcset")),
-        ]);
-
-        return [...new Set(urls.filter(Boolean))];
+        ]).filter(Boolean))];
       });
 
-      console.log(`Found ${images.length} images`);
-
       for (const imgUrl of images) {
+        if (seen.has(imgUrl)) continue;
+        seen.add(imgUrl);
+
         try {
-          const buffer = await withRetry(async () => {
-            const res = await page.request.get(imgUrl, {
-              timeout: 30000,
-            });
-
-            if (!res.ok()) {
-              throw new Error(`HTTP ${res.status()}`);
-            }
-
-            return await res.body();
+          const res = await context.request.get(imgUrl, {
+            timeout: 30000,
+            headers: {
+              referer: url,
+            },
           });
 
+          if (!res.ok()) throw new Error(`HTTP ${res.status()}`);
+
+          const buffer = await res.body();
+
           const contentType =
-            (await page.request
-              .fetch(imgUrl, { method: "HEAD" })
-              .catch(() => null))
-              ?.headers()?.["content-type"] || "image/jpeg";
+            res.headers()["content-type"] || "image/jpeg";
 
           const base64 = buffer.toString("base64");
 
           stream.write(`
-<div class="img-wrap">
-  <img src="data:${contentType};base64,${base64}" alt="img-${globalIndex}">
-</div>`);
+<div>
+  <img src="data:${contentType};base64,${base64}" alt="img-${imgIndex}">
+</div>
+`);
 
-          console.log(`Saved image ${globalIndex}`);
-          globalIndex++;
+          console.log(`Embedded image ${imgIndex}`);
+          imgIndex++;
+
         } catch (err) {
           console.log(`Failed image: ${imgUrl}`);
         }
       }
+
     } catch (err) {
       console.log(`Page failed: ${url} -> ${err.message}`);
     } finally {
@@ -145,9 +138,6 @@ img { max-width:95%; margin:10px 0; box-shadow:0 0 10px rgba(0,0,0,.5); }
   stream.write(`</body></html>`);
   stream.end();
 
-  console.log("\n====================================");
-  console.log("DONE");
-  console.log(`Total images embedded: ${globalIndex - 1}`);
-  console.log("Output: output/scroll.html");
-  console.log("====================================");
+  console.log("\nDONE");
+  console.log(`Total embedded images: ${imgIndex - 1}`);
 })();
