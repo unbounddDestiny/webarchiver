@@ -1,10 +1,14 @@
 const fs = require("fs-extra");
 const { chromium } = require("playwright");
-const https = require("https");
-const http = require("http");
 
 function pad(num, width) {
   return String(num).padStart(width, "0");
+}
+
+function mustInt(value, name) {
+  const n = parseInt(value);
+  if (Number.isNaN(n)) throw new Error(`Invalid ${name}`);
+  return n;
 }
 
 function generateUrls(base, start, end, step, width, symbol) {
@@ -15,157 +19,135 @@ function generateUrls(base, start, end, step, width, symbol) {
   return urls;
 }
 
-// Download image into a Buffer
-function downloadBuffer(url) {
-  return new Promise((resolve, reject) => {
-    const client = url.startsWith("https") ? https : http;
-
-    client
-      .get(url, (res) => {
-        if (res.statusCode !== 200) {
-          return reject(new Error(`Failed: ${res.statusCode}`));
-        }
-
-        const chunks = [];
-
-        res.on("data", (chunk) => chunks.push(chunk));
-
-        res.on("end", () => {
-          resolve(Buffer.concat(chunks));
-        });
-      })
-      .on("error", reject);
-  });
+async function withRetry(fn, retries = 3) {
+  let lastErr;
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
 }
 
 (async () => {
   const baseUrl = process.env.BASE_URL;
-  const start = parseInt(process.env.START);
-  const end = parseInt(process.env.END);
-  const padding = parseInt(process.env.PADDING);
-  const step = parseInt(process.env.STEP);
+  const start = mustInt(process.env.START, "START");
+  const end = mustInt(process.env.END, "END");
+  const padding = mustInt(process.env.PADDING, "PADDING");
+  const step = mustInt(process.env.STEP, "STEP");
   const symbol = process.env.SYMBOL;
 
   const urls = generateUrls(baseUrl, start, end, step, padding, symbol);
 
-  const browser = await chromium.launch();
-  const page = await browser.newPage();
+  const browser = await chromium.launch({ headless: true });
 
   fs.ensureDirSync("output");
+  const stream = fs.createWriteStream("output/scroll.html");
 
-  console.log(`Starting archive: ${urls.length} pages`);
+  stream.write(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Image Archive</title>
+<style>
+body { margin:0; background:#111; display:flex; flex-direction:column; align-items:center; }
+img { max-width:95%; margin:10px 0; box-shadow:0 0 10px rgba(0,0,0,.5); }
+</style>
+</head>
+<body>
+`);
 
-  let chapterIndex = 1;
-  let globalImgIndex = 1;
+  console.log(`Starting scrape: ${urls.length} pages`);
 
-  const htmlImages = [];
+  let globalIndex = 1;
 
   for (const url of urls) {
-    const chapterId = pad(chapterIndex, 3);
+    const page = await browser.newPage();
 
     try {
-      console.log(`Processing ${url}`);
+      console.log(`\nVisiting: ${url}`);
 
       await page.goto(url, {
-        waitUntil: "networkidle",
+        waitUntil: "domcontentloaded",
         timeout: 60000,
       });
 
-      const images = await page.$$eval("img", (imgs) =>
-        imgs
-          .map((img) => img.currentSrc || img.src || img.getAttribute("data-src"))
-          .filter(Boolean)
-      );
+      await page.waitForSelector("img", { timeout: 10000 });
+
+      // Trigger lazy-loading
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      await page.waitForTimeout(1500);
+
+      const images = await page.$$eval("img", (imgs) => {
+        const extractSrcset = (srcset) =>
+          srcset
+            ? srcset.split(",").map((s) => s.trim().split(" ")[0])
+            : [];
+
+        const urls = imgs.flatMap((img) => [
+          img.currentSrc,
+          img.src,
+          img.getAttribute("data-src"),
+          img.getAttribute("data-original"),
+          img.getAttribute("data-lazy"),
+          ...extractSrcset(img.getAttribute("srcset")),
+        ]);
+
+        return [...new Set(urls.filter(Boolean))];
+      });
 
       console.log(`Found ${images.length} images`);
 
       for (const imgUrl of images) {
         try {
-          const buffer = await downloadBuffer(imgUrl);
+          const buffer = await withRetry(async () => {
+            const res = await page.request.get(imgUrl, {
+              timeout: 30000,
+            });
 
-          let mime = "image/jpeg";
+            if (!res.ok()) {
+              throw new Error(`HTTP ${res.status()}`);
+            }
 
-          const lower = imgUrl.toLowerCase();
+            return await res.body();
+          });
 
-          if (lower.includes(".webp")) mime = "image/webp";
-          else if (lower.includes(".png")) mime = "image/png";
-          else if (lower.includes(".gif")) mime = "image/gif";
-          else if (lower.includes(".avif")) mime = "image/avif";
-          else if (lower.includes(".svg")) mime = "image/svg+xml";
-          else if (lower.includes(".bmp")) mime = "image/bmp";
+          const contentType =
+            (await page.request
+              .fetch(imgUrl, { method: "HEAD" })
+              .catch(() => null))
+              ?.headers()?.["content-type"] || "image/jpeg";
 
           const base64 = buffer.toString("base64");
 
-          htmlImages.push(`
+          stream.write(`
 <div class="img-wrap">
-  <img loading="lazy" src="data:${mime};base64,${base64}" alt="Image ${globalImgIndex}">
+  <img src="data:${contentType};base64,${base64}" alt="img-${globalIndex}">
 </div>`);
 
-          console.log(`Embedded image ${globalImgIndex}`);
-
-          globalImgIndex++;
+          console.log(`Saved image ${globalIndex}`);
+          globalIndex++;
         } catch (err) {
-          console.log(`Image failed: ${imgUrl}`);
+          console.log(`Failed image: ${imgUrl}`);
         }
       }
-
-      chapterIndex++;
     } catch (err) {
-      console.log(`Failed chapter ${url}: ${err.message}`);
+      console.log(`Page failed: ${url} -> ${err.message}`);
+    } finally {
+      await page.close();
     }
   }
 
   await browser.close();
 
-  const finalHtml = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Image Scroll Archive</title>
+  stream.write(`</body></html>`);
+  stream.end();
 
-<style>
-html,body{
-    margin:0;
-    padding:0;
-    background:#111;
-}
-
-body{
-    display:flex;
-    flex-direction:column;
-    align-items:center;
-    font-family:sans-serif;
-}
-
-.img-wrap{
-    width:100%;
-    display:flex;
-    justify-content:center;
-    padding:10px 0;
-}
-
-img{
-    max-width:95%;
-    height:auto;
-    display:block;
-    box-shadow:0 0 10px rgba(0,0,0,.5);
-}
-</style>
-
-</head>
-<body>
-
-${htmlImages.join("\n")}
-
-</body>
-</html>`;
-
-  fs.writeFileSync("output/scroll.html", finalHtml, "utf8");
-
-  console.log("");
-  console.log("====================================");
-  console.log("DONE!");
-  console.log(`Embedded ${globalImgIndex - 1} images.`);
-  console.log("Saved: output/scroll.html");
+  console.log("\n====================================");
+  console.log("DONE");
+  console.log(`Total images embedded: ${globalIndex - 1}`);
+  console.log("Output: output/scroll.html");
   console.log("====================================");
 })();
