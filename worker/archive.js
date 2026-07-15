@@ -339,260 +339,311 @@ async function worker(
 // MAIN
 // -------------------------
 
-(async()=>{
+(async () => {
 
+  const baseUrl = process.env.BASE_URL;
 
-const baseUrl =
-  process.env.BASE_URL;
-
-
-const start =
-  mustInt(
+  const start = mustInt(
     process.env.START,
     "START"
   );
 
-
-const end =
-  mustInt(
+  const end = mustInt(
     process.env.END,
     "END"
   );
 
-
-const step =
-  mustInt(
+  const step = mustInt(
     process.env.STEP,
     "STEP"
   );
 
-
-const padding =
-  mustInt(
+  const width = mustInt(
     process.env.PADDING,
     "PADDING"
   );
 
+  const symbol = process.env.SYMBOL;
 
-const workers =
-  mustInt(
-    process.env.WORKERS || 5,
+
+  const workerCount = mustInt(
+    process.env.WORKERS || "5",
     "WORKERS"
   );
 
 
-
-const urls =
-generateUrls(
-
-  baseUrl,
-
-  start,
-
-  end,
-
-  step,
-
-  padding,
-
-  process.env.SYMBOL,
-
-  process.env.OUTER_START,
-
-  process.env.OUTER_END,
-
-  process.env.OUTER_SYMBOL
-
-);
+  const urls = generateUrls(
+    baseUrl,
+    start,
+    end,
+    step,
+    width,
+    symbol
+  );
 
 
-
-console.log(
-  `Total URLs: ${urls.length}`
-);
-
+  const browser = await chromium.launch({
+    headless: true
+  });
 
 
-await fs.ensureDir(
-  "output"
-);
+  const context = await browser.newContext();
 
 
+  fs.ensureDirSync("output");
 
-const stream =
-  fs.createWriteStream(
+
+  const stream = fs.createWriteStream(
     "output/scroll.html"
   );
 
 
-
-stream.write(`
+  stream.write(`
 <!doctype html>
 <html>
-<body style="
+<head>
+<meta charset="utf-8">
+<title>Adaptive Image Archive</title>
+<style>
+body {
+margin:0;
 background:#111;
 display:flex;
 flex-direction:column;
 align-items:center;
-">
-`
-);
+}
+
+img {
+max-width:95%;
+margin:10px 0;
+}
+</style>
+</head>
+<body>
+`);
 
 
+  const seen = new Set();
 
-const browser =
-  await chromium.launch({
-    headless:true
-  });
+  let imgIndex = 1;
 
 
-
-const context =
-  await browser.newContext();
-
-
-
-const seen =
-  new Set();
+  async function processImage(
+    imgUrl,
+    referer
+  ) {
 
 
-let index = 1;
+    if (seen.has(imgUrl))
+      return;
 
 
-
-async function saveImage(
-  imgUrl,
-  referer
-){
+    seen.add(imgUrl);
 
 
-if(seen.has(imgUrl))
-  return;
+    try {
+
+      const res =
+        await context.request.get(
+          imgUrl,
+          {
+            timeout:30000,
+
+            headers:{
+              referer,
+
+              "user-agent":
+              "Mozilla/5.0 Chrome/120"
+            }
+          }
+        );
 
 
-seen.add(imgUrl);
+      if (!res.ok())
+        throw new Error();
 
 
+      const buffer =
+        await res.body();
 
-try{
+
+      const type =
+        res.headers()["content-type"]
+        ||
+        "image/jpeg";
 
 
-const res =
- await context.request.get(
-   imgUrl,
-   {
-    timeout:30000,
+      stream.write(`
+<div>
+<img src="data:${type};base64,${buffer.toString("base64")}"
+alt="img-${imgIndex}">
+</div>
+`);
 
-    headers:{
-      referer,
 
-      "user-agent":
-      "Mozilla/5.0 Chrome/120"
+      console.log(
+        `Embedded ${imgIndex}`
+      );
+
+
+      imgIndex++;
+
+
+    } catch {
+
+      console.log(
+        `Failed image ${imgUrl}`
+      );
+
     }
-   }
- );
+
+  }
 
 
 
-if(!res.ok())
- throw new Error();
+  const jobs = [...urls];
+
+
+  async function worker(id) {
+
+
+    while (jobs.length) {
+
+
+      const url =
+        jobs.shift();
+
+
+      if (!url)
+        return;
+
+
+      const page =
+        await context.newPage();
+
+
+      try {
+
+
+        console.log(
+          `[Worker ${id}] Visiting ${url}`
+        );
+
+
+        await page.goto(
+          url,
+          {
+            waitUntil:
+            "domcontentloaded",
+
+            timeout:
+            90000
+          }
+        );
+
+
+        await page.waitForTimeout(
+          1500
+        );
+
+
+        await autoScroll(page);
+
+
+        await page.evaluate(() => {
+
+          window.scrollTo(
+            0,
+            document.body.scrollHeight
+          );
+
+        });
+
+
+        await page.waitForTimeout(
+          1500
+        );
+
+
+        const images =
+          await extractImages(page);
 
 
 
-const buffer =
- await res.body();
+        console.log(
+          `[Worker ${id}] Found ${images.length}`
+        );
+
+
+        for (const img of images) {
+
+          await processImage(
+            img,
+            url
+          );
+
+        }
+
+
+      } catch(err) {
+
+
+        console.log(
+          `[Worker ${id}] Failed ${url}: ${err.message}`
+        );
+
+
+      } finally {
+
+
+        await page.close();
+
+
+      }
+
+    }
+
+  }
 
 
 
-const type =
- res.headers()["content-type"]
- ||
- "image/jpeg";
+  const workers = [];
+
+
+  for (
+    let i = 0;
+    i < workerCount;
+    i++
+  ) {
+
+    workers.push(
+      worker(i + 1)
+    );
+
+  }
+
+
+  await Promise.all(workers);
 
 
 
-stream.write(`
-<img style="max-width:95%;margin:10px"
-src="data:${type};base64,${buffer.toString("base64")}">
-`
-);
+  await browser.close();
 
 
 
-console.log(
- `Embedded ${index}`
-);
+  stream.write(`
+</body>
+</html>
+`);
+
+  stream.end();
 
 
 
-index++;
-
-
-}
-catch{
-
-console.log(
- `Image failed ${imgUrl}`
-);
-
-}
-
-
-}
-
-
-
-
-
-const jobs =
-[...urls];
-
-
-
-const pool=[];
-
-
-
-for(
- let i=0;
- i<workers;
- i++
-){
-
-pool.push(
- worker(
-   i+1,
-   jobs,
-   context,
-   saveImage
- )
-);
-
-}
-
-
-
-await Promise.all(pool);
-
-
-
-await browser.close();
-
-
-
-stream.write(
-"</body></html>"
-);
-
-
-stream.end();
-
-
-
-console.log(
-`DONE ${index-1} images`
-);
-
+  console.log(
+    `DONE - ${imgIndex - 1} images`
+  );
 
 
 })();
+
