@@ -29,7 +29,6 @@ async function autoScroll(page) {
   while (stableRounds < 4) {
     const newHeight = await page.evaluate(() => document.body.scrollHeight);
 
-    // detect if page stopped growing
     if (newHeight === previousHeight) {
       stableRounds++;
     } else {
@@ -37,15 +36,11 @@ async function autoScroll(page) {
       previousHeight = newHeight;
     }
 
-    // scroll a bit (not full jump)
     await page.evaluate(() => {
       window.scrollBy(0, window.innerHeight * 0.6);
     });
 
-    // 🔥 KEY FIX: wait long enough for delayed injection
     await page.waitForTimeout(5000);
-
-    // extra micro-wait for JS batching (important for React sites)
     await page.waitForTimeout(1000);
   }
 }
@@ -74,7 +69,69 @@ async function extractImages(page) {
   });
 }
 
+
+// -------------------------
+// WORKER
+// -------------------------
+async function worker(id, jobs, context, writeImage) {
+
+  while (jobs.length) {
+
+    const job = jobs.shift();
+    if (!job) return;
+
+    const page = await context.newPage();
+
+    try {
+      console.log(`[Worker ${id}] Visiting ${job}`);
+
+      await page.goto(job, {
+        waitUntil: "domcontentloaded",
+        timeout: 90000,
+      });
+
+      await page.waitForTimeout(1500);
+
+      await autoScroll(page);
+
+      await page.evaluate(() => {
+        window.scrollTo(0, document.body.scrollHeight);
+      });
+
+      await page.waitForTimeout(1500);
+
+      const images = await extractImages(page);
+
+      console.log(
+        `[Worker ${id}] Found ${images.length} images`
+      );
+
+      for (const imgUrl of images) {
+
+        await writeImage(imgUrl, job);
+
+      }
+
+    } catch (err) {
+
+      console.log(
+        `[Worker ${id}] Failed ${job}: ${err.message}`
+      );
+
+    } finally {
+
+      await page.close();
+
+    }
+  }
+}
+
+
+// -------------------------
+// MAIN
+// -------------------------
 (async () => {
+
   const baseUrl = process.env.BASE_URL;
   const start = mustInt(process.env.START, "START");
   const end = mustInt(process.env.END, "END");
@@ -82,14 +139,35 @@ async function extractImages(page) {
   const width = mustInt(process.env.PADDING, "PADDING");
   const symbol = process.env.SYMBOL;
 
-  const urls = generateUrls(baseUrl, start, end, step, width, symbol);
+  const concurrency = mustInt(
+    process.env.WORKERS || 5,
+    "WORKERS"
+  );
 
-  const browser = await chromium.launch({ headless: true });
+
+  const urls = generateUrls(
+    baseUrl,
+    start,
+    end,
+    step,
+    width,
+    symbol
+  );
+
+
+  const browser = await chromium.launch({
+    headless: true
+  });
+
   const context = await browser.newContext();
+
 
   fs.ensureDirSync("output");
 
-  const stream = fs.createWriteStream("output/scroll.html");
+  const stream = fs.createWriteStream(
+    "output/scroll.html"
+  );
+
 
   stream.write(`<!doctype html>
 <html>
@@ -98,109 +176,141 @@ async function extractImages(page) {
 <title>Adaptive Image Archive</title>
 <style>
 body {
-  margin: 0;
-  background: #111;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
+ margin:0;
+ background:#111;
+ display:flex;
+ flex-direction:column;
+ align-items:center;
 }
 
 img {
-  max-width: 95%;
-  margin: 10px 0;
-  box-shadow: 0 0 10px rgba(0,0,0,0.6);
+ max-width:95%;
+ margin:10px 0;
+ box-shadow:0 0 10px rgba(0,0,0,.6);
 }
 </style>
 </head>
 <body>
 `);
 
-  let imgIndex = 1;
-  const seen = new Set();
 
-  for (const url of urls) {
-    const page = await context.newPage();
+  const seen = new Set();
+  let imgIndex = 1;
+
+  // prevents simultaneous writes corrupting HTML
+  const lock = [];
+
+  async function writeImage(imgUrl, referer) {
+
+    // simple mutex
+    while (lock.length)
+      await lock[0];
+
+    let release;
+    const promise = new Promise(r => release = r);
+
+    lock.push(promise);
+
 
     try {
-      console.log(`\nVisiting: ${url}`);
 
-      await page.goto(url, {
-        waitUntil: "domcontentloaded",
-        timeout: 90000,
+      if (seen.has(imgUrl))
+        return;
+
+      seen.add(imgUrl);
+
+
+      const res = await context.request.get(imgUrl, {
+        timeout: 30000,
+        headers: {
+          referer,
+          "user-agent":
+            "Mozilla/5.0 Chrome/120 Safari/537.36"
+        }
       });
 
-      // initial settle
-      await page.waitForTimeout(1500);
 
-      // -------------------------
-      // ADAPTIVE LAZY LOADING
-      // -------------------------
-      await autoScroll(page);
+      if (!res.ok())
+        throw new Error(`HTTP ${res.status()}`);
 
-      // final scroll burst (some sites need it)
-      await page.evaluate(() => {
-        window.scrollTo(0, document.body.scrollHeight);
-      });
 
-      await page.waitForTimeout(1500);
+      const buffer = await res.body();
 
-      // -------------------------
-      // EXTRACT IMAGES AFTER LOAD
-      // -------------------------
-      const images = await extractImages(page);
+      const contentType =
+        res.headers()["content-type"] ||
+        "image/jpeg";
 
-      console.log(`Found ${images.length} images`);
 
-      // -------------------------
-      // DOWNLOAD + EMBED
-      // -------------------------
-      for (const imgUrl of images) {
-        if (seen.has(imgUrl)) continue;
-        seen.add(imgUrl);
+      const base64 =
+        buffer.toString("base64");
 
-        try {
-          const res = await context.request.get(imgUrl, {
-            timeout: 30000,
-            headers: {
-              referer: url,
-              "user-agent":
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-            },
-          });
 
-          if (!res.ok()) throw new Error(`HTTP ${res.status()}`);
-
-          const buffer = await res.body();
-          const contentType = res.headers()["content-type"] || "image/jpeg";
-
-          const base64 = buffer.toString("base64");
-
-          stream.write(`
+      stream.write(`
 <div>
-  <img src="data:${contentType};base64,${base64}" alt="img-${imgIndex}">
+<img src="data:${contentType};base64,${base64}" alt="img-${imgIndex}">
 </div>
 `);
 
-          console.log(`Embedded ${imgIndex}`);
-          imgIndex++;
 
-        } catch (err) {
-          console.log(`Failed image: ${imgUrl}`);
-        }
-      }
+      console.log(
+        `Embedded ${imgIndex}`
+      );
 
-    } catch (err) {
-      console.log(`Page failed: ${url} -> ${err.message}`);
+      imgIndex++;
+
+
+    } catch {
+
+      console.log(
+        `Failed image: ${imgUrl}`
+      );
+
     } finally {
-      await page.close();
+
+      lock.shift();
+      release();
+
     }
   }
 
+
+  const jobs = [...urls];
+
+
+  const workers = [];
+
+  for (
+    let i = 0;
+    i < concurrency;
+    i++
+  ) {
+    workers.push(
+      worker(
+        i + 1,
+        jobs,
+        context,
+        writeImage
+      )
+    );
+  }
+
+
+  await Promise.all(workers);
+
+
   await browser.close();
 
-  stream.write(`</body></html>`);
+
+  stream.write(`
+</body>
+</html>`);
+
   stream.end();
 
+
   console.log("\nDONE");
-  console.log(`Total embedded images: ${imgIndex - 1}`);
+  console.log(
+    `Total embedded images: ${imgIndex - 1}`
+  );
+
 })();
