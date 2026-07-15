@@ -3,56 +3,129 @@ name: Web Archiver
 on:
   workflow_dispatch:
     inputs:
+
       baseUrl:
-        description: "Base URL with # placeholder"
+        description: "Base URL with # and @ placeholders"
         required: true
+
       start:
+        description: "Inner loop start"
         required: true
         default: "1"
+
       end:
+        description: "Inner loop end"
         required: true
         default: "10"
+
       padding:
+        description: "Inner number padding"
         required: true
         default: "3"
+
       step:
+        description: "Inner loop step"
         required: true
         default: "1"
+
       symbol:
+        description: "Inner symbol (#)"
         required: true
         default: "#"
 
+
+      outerStart:
+        description: "Outer loop start letter"
+        required: true
+        default: "A"
+
+      outerEnd:
+        description: "Outer loop end letter"
+        required: true
+        default: "Z"
+
+      outerSymbol:
+        description: "Outer symbol (@)"
+        required: true
+        default: "@"
+
+
+      workers:
+        description: "Parallel browser workers"
+        required: false
+        default: "5"
+
+
+
 jobs:
+
   archive:
+
     runs-on: ubuntu-latest
 
+
     steps:
+
       - name: Checkout repo
         uses: actions/checkout@v4
+
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
+
       - name: Install dependencies
-        run: npm install playwright archiver fs-extra
+        run: npm install playwright fs-extra
+
 
       - name: Install browsers
         run: npx playwright install --with-deps
 
+
       - name: Run archiver
         run: node worker/archive.js
         env:
-          BASE_URL: ${{ github.event.inputs.baseUrl }}
-          START: ${{ github.event.inputs.start }}
-          END: ${{ github.event.inputs.end }}
-          PADDING: ${{ github.event.inputs.padding }}
-          STEP: ${{ github.event.inputs.step }}
-          SYMBOL: ${{ github.event.inputs.symbol }}
+
+          BASE_URL:
+            ${{ github.event.inputs.baseUrl }}
+
+          START:
+            ${{ github.event.inputs.start }}
+
+          END:
+            ${{ github.event.inputs.end }}
+
+          STEP:
+            ${{ github.event.inputs.step }}
+
+          PADDING:
+            ${{ github.event.inputs.padding }}
+
+          SYMBOL:
+            ${{ github.event.inputs.symbol }}
+
+
+          OUTER_START:
+            ${{ github.event.inputs.outerStart }}
+
+          OUTER_END:
+            ${{ github.event.inputs.outerEnd }}
+
+          OUTER_SYMBOL:
+            ${{ github.event.inputs.outerSymbol }}
+
+
+          WORKERS:
+            ${{ github.event.inputs.workers }}
+
+
 
       - name: Upload result
         uses: actions/upload-artifact@v4
         with:
+
           name: archive-output
+
           path: output/
