@@ -20,66 +20,32 @@ function mustInt(v, name) {
 }
 
 
-
-// -------------------------
-// NESTED URL GENERATOR
-// -------------------------
-
 function generateUrls(
   base,
   start,
   end,
   step,
   width,
-  innerSymbol,
-  outerStart,
-  outerEnd,
-  outerSymbol
+  symbol
 ) {
-
-
   const urls = [];
 
-
   for (
-    let outer = outerStart.charCodeAt(0);
-    outer <= outerEnd.charCodeAt(0);
-    outer++
+    let i = start;
+    i <= end;
+    i += step
   ) {
-
-
-    const outerValue =
-      String.fromCharCode(outer);
-
-
-
-    for (
-      let i = start;
-      i <= end;
-      i += step
-    ) {
-
-
-      urls.push(
-        base
-          .replace(
-            outerSymbol,
-            outerValue
-          )
-          .replace(
-            innerSymbol,
-            pad(i, width)
-          )
-      );
-
-    }
-
+    urls.push(
+      base.replace(
+        symbol,
+        pad(i, width)
+      )
+    );
   }
 
-
   return urls;
-
 }
+
 
 
 
